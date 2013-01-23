@@ -1,0 +1,209 @@
+
+TLS部分实现请参考[http://www.searchtb.com/2012/09/tls.html 线程局部变量与__thread]
+
+<syntaxhighlight lang="CPP" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+/*! @addtogroup Util
+ * @{
+ */
+
+/**
+ * @file   Reuseable.h
+ * @author jianhao@taobao.com
+ * @date   2012-11-13
+ *
+ * @brief 类实例在线程内共享实现
+ */
+
+#ifndef SP_BASIC_UTIL_REUSEABLE_H
+#define SP_BASIC_UTIL_REUSEABLE_H
+
+#include <vector>
+
+#include "Tls.h"
+#include "sp_basic/common/common.h"
+
+namespace sp_basic
+{
+
+/**
+ * @brief 线程内对象共享。如果一个类需要支持对象共享，则继承该类即可。
+ *        目前为实现简单高效，只支持线程内的对象共享，各线程间各自维护一份自己的对象池。
+ *        支持对对象池空闲对象个数做限制，所有的对象在复用一定次数后会释放
+ *        对象池内的所有对象会在线程退出时自动释放
+ *        注意如果使用对象共享，则类的成员变量不能从mempool里分配内存
+ *
+ * @param T            需要支持对象共享的类
+ * @param FreeCntLimit 对象池内的空闲对象个数上限，超过限制后所有回收的对象将直接释放
+ *                     默认值为1
+ * @param ReuseLimit   对象复用次数上限，达到上限后所有回收的对象会直接释放
+ *                     默认值为10240
+ *
+ * @par 使用Reuseable示例
+ * @code
+ class Foo;
+ typedef Reuseable<Foo, 16, 512> FooBase;
+ class Foo : public FooBase                // 继承Reuseable类获取Reuseable功能
+ {
+     Foo() : FooBase()                     // 将构造函数设置为私有，避免外部进行创建
+     { }
+     
+     virtual ~Foo();                       // 将析构函数设置为私有，避免外部进行释放
+
+     virtual void clear();                 // 实现clear虚函数，将对象清空，以实现复用
+
+ protected :
+     Foo(const Foo &);                     // 不能拷贝构造
+     Fool &operator=(const Foo &);         // 不能赋值构造
+ };
+ * @endcode
+ */
+template <typename T, size_t FreeCntLimit = 1, size_t ReuseLimit = 10240>
+class Reuseable
+{
+private :
+    typedef Reuseable<T, FreeCntLimit, ReuseLimit> Self;
+    
+public :
+    /**
+     * @brief 得到一个新的T类型的实例。
+     *        如果当前对象池为空，则创建一个新的对象并返回
+     *        如果当前对象池不为空，则从对象池里取一个并返回
+     */
+    static T* make();
+
+    /**
+     * @brief 将当前对象放入对象池。在放入对象池前，会自动调用clear对其内容进行清空
+     *        所有调用make得到的对象在使用完成后都必须调用recycle将其回收，
+     *        否则该对象将成为野指针从而导致内存泄露
+     */
+    void recycle();
+
+    Reuseable() : _reused_cnt(1)
+    { }
+
+    virtual ~Reuseable()
+    { }
+
+    /**
+     * @brief 清空当前对象的所有内容
+     *        纯虚函数，所有子类必须实现自己的clear函数
+     *        实现clear函数时需要注意不要遗漏、注意处理指针不要出现内存泄露
+     */
+    virtual void clear() = 0;
+
+    /**
+     * @brief 获取该类当前空闲对象的个数
+     */
+    static size_t getFreeObjCnt();
+
+protected :
+    //! no copy able
+    Reuseable(const Reuseable &);
+    Reuseable &operator=(const Reuseable &);
+
+    static void checkInit();
+
+    /**
+     * @brief 释放对象池里的所有对象以及对象池。注意与recycle区别开！！
+     */
+    static void destroy(void *obj_list);
+
+private :
+    typedef std::vector<T *>          ObjectList;
+
+    //! free object list.
+    static __thread ObjectList *      _free_objs;
+
+private :
+    size_t                            _reused_cnt;
+    size_t                            _free_cnt_limit;
+    size_t                            _reuse_limit;
+};
+
+
+template <typename T, size_t FreeCntLimit, size_t ReuseLimit>
+__thread typename Reuseable<T, FreeCntLimit, ReuseLimit>::ObjectList *
+Reuseable<T, FreeCntLimit, ReuseLimit>::_free_objs = NULL;
+
+
+template <typename T, size_t FreeCntLimit, size_t ReuseLimit>
+T *Reuseable<T, FreeCntLimit, ReuseLimit>::make()
+{
+    checkInit();
+
+    T *obj = NULL;
+    
+    if (UNLIKELY(_free_objs->empty())) {
+        obj = new T();
+    }
+    else {
+        obj = _free_objs->back();
+        ++(obj->_reused_cnt);
+        _free_objs->pop_back();
+    }
+    
+    return obj;
+}
+
+template <typename T, size_t FreeCntLimit, size_t ReuseLimit>
+void Reuseable<T, FreeCntLimit, ReuseLimit>::recycle()
+{
+    checkInit();
+    
+    this->clear();
+
+    // 如果当前空闲对象总数达到限制或者当前对象重用次数达到限制，则直接释放
+    if (UNLIKELY(_free_objs->size() >= FreeCntLimit || _reused_cnt >= ReuseLimit)) {
+        delete this;
+    }
+    else {
+        _free_objs->push_back(dynamic_cast<T *>(this));
+    }
+}
+
+template <typename T, size_t FreeCntLimit, size_t ReuseLimit>
+size_t Reuseable<T, FreeCntLimit, ReuseLimit>::getFreeObjCnt()
+{
+    if (UNLIKELY(_free_objs == NULL)) {
+        return 0;
+    }
+    else {
+        return _free_objs->size();
+    }
+}
+
+template <typename T, size_t FreeCntLimit, size_t ReuseLimit>
+void Reuseable<T, FreeCntLimit, ReuseLimit>::checkInit()
+{
+    if (UNLIKELY(_free_objs == NULL)) {
+        _free_objs = new ObjectList();
+        _free_objs->reserve(FreeCntLimit);
+        Tls::pthread_atexit_add(_free_objs, Self::destroy);
+    }
+}
+
+template <typename T, size_t FreeCntLimit, size_t ReuseLimit>
+void Reuseable<T, FreeCntLimit, ReuseLimit>::destroy(void *obj_list)
+{
+    ObjectList *free_objs = (ObjectList *)(obj_list);
+    if (LIKELY(free_objs != NULL)) {
+        for (typename ObjectList::iterator it = free_objs->begin();
+             it != free_objs->end(); ++it) {
+            if (*it != NULL) {
+                delete (*it);
+            }
+        }
+        
+        delete free_objs;
+        free_objs = NULL;
+    }
+}
+
+} // end of namespace sp_basic
+
+#endif /* SP_BASIC_UTIL_REUSEABLE_H */
+
+
+/*! @} */
+
+</syntaxhighlight>
