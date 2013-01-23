@@ -1,0 +1,83 @@
+又看到微博上大家在讨论rm -rf 的惨痛教训了。经历了上一次rm -rf *的教训后，我也写了个自己的脚本替换rm。<br>
+将以下内容保存到$HOME/bin目录下，文件名为rm，并在$PATH里把$HOME/bin放在最前面：export $PATH=$HOME/bin:$PATH <br>
+<syntaxhighlight lang="bash" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+#!/bin/bash
+# FILE: $HOME/rm
+
+let recursive=0
+let force=0
+while getopts "rf" opt; do
+    case $opt in
+        f) :
+            force=1
+            ;;
+        r) :
+            recursive=1
+            ;;
+        \?) :
+            echo "invalid argument"
+            exit 255
+    esac
+done
+
+TRASH=$HOME/.trash
+
+if [[ ! -d $TRASH ]];
+then
+    mkdir $TRASH
+fi
+
+shift $(($OPTIND - 1))
+for f in $*;
+do
+    if [[ ! -e $f ]];
+    then
+        if [[ $force -eq 1 ]];
+        then
+            continue
+        else
+            echo "$0: no such file or directory '$f'"
+            exit 1
+        fi
+    fi
+
+    if [[ -d $f && $recursive -eq 0 ]];
+    then
+        if [[ $force -eq 1 ]];
+        then
+            exit 0
+        else
+            echo "$0: $f is a directory"
+            exit 1
+        fi
+    fi
+
+    name=$(basename $f)
+
+    if [[ -z $name ]];
+    then
+        continue
+    fi
+
+    if [[ -e $TRASH/$name ]];
+    then
+        ts=$(date +%s)
+        mv -f $TRASH/$name $TRASH/${name}_${ts}
+    fi
+
+    # sometimes $TRASH/$name still exist
+    /bin/rm -rf $TRASH/$name
+
+    mv -f $f $TRASH/
+done
+
+# rm files which last change time older than 10days ago
+# exclude $TRASH self
+for f in `find $TRASH -maxdepth 1 -ctime +2 -not \( -wholename $TRASH \)`;
+do
+    /bin/rm -rf $f
+done
+
+exit 0
+
+</syntaxhighlight>

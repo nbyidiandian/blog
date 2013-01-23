@@ -1,0 +1,159 @@
+= const该用在哪些地方？=
+<syntaxhighlight lang="CPP">
+int func(int i);
+int func(const int i); 
+const int func(const int i);
+const int func(const int i) const;
+const int func(const int &i) const;
+
+typedef std::vector<std::string> Vector;
+Vector func(Vector v);
+Vector func(const Vector v);
+const Vector func(const Vector v);
+const Vector func(const Vector v) const;
+const Vector func(const Vector &v) const;
+</syntaxhighlight>
+我们一个一个来说明
+
+== int func(int i); ==
+这个最简单，没啥好说的
+
+== int func(const int i);  ==
+基本类型在函数调用时本来就是拷贝了一份（在JAVA里大家会经常讨论函数参数传递到底是值传递还是引用传递，在C++里没有这种误区，参数传递是引用传递还是值传递我们自已非常清楚），所以这里加上const限定没有任何意义，你对这个拷贝的值怎么做修改都没人在乎。反倒是在某些情况下函数内部为了省内存，会直接修改参数。比如：
+<syntaxhighlight lang="CPP">
+int func(int i)
+{
+    while (--i)
+    {
+        printf("hello\n");
+    }
+}
+</syntaxhighlight>
+这段代码里如果给func函数的参数i加上const限定，就需要在栈上再声明一个变量来做循环。<br>
+当然这种直接修改参数值的做法不值得提倡，出了问题debug起来会比较麻烦一些
+
+== const int func(const int i); ==
+对于基本类型作为返回值，编译器通常是把返回值——注意不是返回值的地址拷贝到寄存器里返回。这个返回值本来就是const的，不信你去编译下下面这段代码：
+<syntaxhighlight lang="CPP">
+int func(int i)
+{
+	return i;
+}
+
+int main(int argc, char *argv[])
+{
+    int &ret1 = func(1);
+    const int &ret2 = func(2);
+    return 0;
+}
+</syntaxhighlight>
+编译器会告诉你main里的第一行代码有问题：“invalid initialization of non-const reference of type ‘int&’ from a temporary of type ‘const int’”。<br>
+所以这里返回值前的const限定没有任何意义。
+
+== const int func(const int i) const; ==
+参考前面两个，参数和返回值的const限定都没意义，都去掉吧。这里函数最后面的这个const是干什么用的呢？函数声明后加的const通常是用在类里，用来标识这是一个const函数，不会对当前的对象做任何修改。一个const对象只能调用该类的const函数。所以个人建议：在类的成员函数里，能加const的，都尽量加上！这也是为什么stl vector里很多函数会有一个const版本和一个非const版本：让const的vector对象和非const的对象都能调用该函数！
+
+== const int func(const int &i) const; ==
+同样，返回值的const限定是没有意义的，去掉吧。但是参数里的i是个引用，引用的是一块函数外部的内存。引用参数的传递编译器通常是通过地址来传递的：将变量的地址通过寄存器传递到函数内部。这样看起来好像确实应该给这里的参数i加上const限定，不然函数内部把我传给它的变量给修改掉了怎么办！但是再仔细一想，如果我把const int &i直接换成int i，不也能达到一样的效果么！不是么？<br>
+所以，这个函数声明应该改成int func(int i)。
+
+== Vector func(Vector v); ==
+我们前面说int func(int i)这个函数定义没有问题，那么Vector func(Vector v)是不是也没问题呢？问题远没这么简单！<br>
+Vector是一个比较复杂的对象，这里使用Vector作为参数，调用时会有一次Vector的拷贝构造函数调用，构造一个临时的Vector对象。而大家知道，stl的vector的拷贝是深拷贝，在里面的数据比较多的情况下是相当消耗性能的。而且这里的Vector只能在函数内部使用，函数返回时会将v对象析构掉。所以整个过程中，拷贝构造临时对象和对临时对象的析构都是没有意义的，白白消耗cpu而已。所以应该把参数里的Vector v改成用引用或者地址传递。具体后面在关于引用的使用部分再讲 <br>
+再来看作为返回值的Vector，拿一段代码来举例子：<br>
+<syntaxhighlight lang="CPP">
+#include <stdio.h>
+#include <vector>
+#include <string>
+
+typedef std::vector<std::string> Vector;
+Vector func()
+{
+    Vector v;
+    printf("%s:%d %p\n", __func__, __LINE__, &v);
+    v.reserve(1000);
+    return v;
+}
+
+int main(int argc, char *argv)
+{
+    Vector v = func();
+    printf("%s:%d %p\n", __func__, __LINE__, &v);
+    return 0;
+}
+</syntaxhighlight>
+很多朋友可能会纠结func这个函数里在栈上构造了一个对象v，这里需要调用一次构造函数，当函数返回时，该对象出了作用域，应该再调用析构函数。但是又有一个return v，这里又应该再调用一次Vector的拷贝构造函数构造一个临时对象用来做返回值。所以开始纠结了：这样看起来很不划算啊！那要怎么解决呢？貌似没有太好的办法。如果是在类里，我们可以把要返回的变量作为类的成员变量，然后返回成员变量的引用或者指针。但是现在这种情况怎么处理好呢？貌似只能是把栈上的v改为在堆上new，然后返回对象的指针。好像也挺别扭，这要求调用方来释放堆上的内存。当然，看起来智能指针是比较理想的选择。<br>
+说了这么多，其实没必要纠结！在gcc里有个编译选项叫-fno-elide-constructors，大家可以看看这个选项的说明。其实这段程序里，Vector的构造函数和析构函数只会调用一次。不信运行这段代码试试！func函数内部和main函数里打印出来的对象地址是一样的！<br>
+所以，返回值直接用Vector在某些情况下是没有问题的。不过个人还是不建议这么做<br>
+
+== Vector func(const Vector v); ==
+难道你给参数里的Vector加上个const限定就有用么？就能解决我们上一个里提到的参数拷贝的问题么？显然不能。<br>
+
+== const Vector func(const Vector v); ==
+在前面我们已经看到，返回值里的Vector是一个临时对象，临时对象就是const的，不用显示加const它也是const！没必要多此一举。<br>
+
+== const Vector func(const Vector v) const; ==
+这里函数后面加了const限定，前面已经提过了，推荐使用。但是参数和返回值的const没有意义
+
+== const Vector func(const Vector &s) const; ==
+这里参数变成了const引用，这就不一样了。强烈推荐输入参数使用这种做法。但是返回值的const限定没意义。
+
+== 小结 ==
+上面两类函数总结出来，应该写成：
+int func(int i) const;
+Vector func(const Vector &v) const;
+当然，函数后的const限定要根据类的设计来决定是否需要加const，能加尽量加。
+
+
+= inline该用在哪里？=
+<syntaxhighlight lang="CPP">
+/* FILE: header.h */
+class Klass
+{
+    inline void func1();
+    inline void func2()
+    { }
+};
+inline void Klass::func1()
+{ }
+</syntaxhighlight>
+这三个inline是否都需要？对于inline到底应该放在函数声明还是函数定义里，没找到一个准确的说法。根据自已的经验，这里Klass里func1和func2前的inline都是可以不用加的，但是Klass::func1定义处的inline必须加上，否则多个cpp文件include这个头文件，在链接时编译器就会告诉你func1有重复定义。而且就算你加了inline，编译器也不一定会真正做inline。如果你的函数要求必须做inline，那应该通过attribute的方式告诉编译器：在函数声明（注意不是函数定义）后加上__attribute__((always_inline))，如果要告诉编译器不能做inline，则加上__attribute__((noinline)) <br>
+那么inline的函数实现能否放到.cpp文件里？显然是不可以的。如果我有两个编译单元，你的inline函数的实现在一个编译单元里，另一个编译单元要调用这个inline函数时，都不知道你的函数实现，编译器怎么做inline呢？难道交给链接器去做 :(  <br>
+
+= static该用在哪里？=
+<syntaxhighlight lang="CPP">
+/* FILE: header.h */
+class Klass
+{
+public :
+    static void func1();
+    static int number1;
+};
+int number2 = 2;
+static int number3 = 3;
+static const int number4 = 4
+extern const int number5;
+static void func2();
+void func3();
+</syntaxhighlight>
+这些函数和变量声明有问题么？<br>
+func1和number1没什么好说的，作为类的静态成员函数和变量，这里的static是指“通过类名可以访问的”，跟c里的static含义不一样。当然，func1和number1还必须有定义。不能在头文件里定义，否则多个cpp文件include同一个头文件，编译器在链接时就会报重复定义了。<br>
+
+int number2 = 2;看起来比较简单，好像没什么问题，但是注意这里有个=号，也就是说这个number2既是声明又是定义！在头文件里定义一个变量，会是什么后果呢？当多个cpp文件都include了这个头文件后，各个cpp文件编译出的.o里都会有一份这个变量，在链接时链接器就会告诉你“multiple definition of number2”<br>
+
+static int number3 = 3前面加了个static，这里的static跟class里的static含义不一样了：这里的static是指“只有在当前编译单元可见”。那么所有include该头文件的cpp文件里，都会有一份number3的定义，而又并不会都用到它，而在没有用到number2的cpp文件在编译时，编译器就会告诉你“warning: ‘number3’ defined but not used”，虽然是warn，但是看着还是不舒服的。所以，static的变量声明不要放到.h文件里——当然类里的static成员变量除外！<br>
+
+static const int number4看着跟number3一样，就多了个const限定，这下就不一样了。编译器会认为这是个常量。就算你include了这个头文件，但是不用number4，编译器也不会警告你。所以大家通常会推荐你使用这种方式来定义常量，而不要用#define的方式：这个能跟宏达到一样的效果，还多了类型检查，何乐而不为呢？<br>
+
+extern const int number5这里的extern是声明一个在其它编译单元里定义的全局变量，当然这里声明的类型必须与其定义的类型一致。显然，你是不能用extern去声明一个在其它编译单元里定义的static变量——它对你是不可见的！<br>
+
+= 引用(&)该用在哪里？=
+<syntaxhighlight lang="CPP">
+void func(const string &s);
+void func(string &s);
+const string &func();
+</syntaxhighlight>
+这些函数声明有问题么？ <br>
+其实前面关于Vector作为函数参数时已经大致提过了：复杂的对象如果直接用对象来传递参数，会存在参数拷贝的问题，而复杂对象的拷贝和析构会消耗性能，所以对于复杂的对象不应该用对象来传递参数，而应该用引用或者对象地址。<br>
+void func(const string &s); 这里的参数是const的引用，函数内部是不能对s做任何修改的，这也是通常作为输入的参数的做法——当然基本类型的参数作为输入时是没必要用引用的，这个前面已经讨论过了。那么引用传参跟地址传参有什么区别呢？从功能上来说大家都能达到一样的效果：加上const限定不允许函数内部对参数做修改。个人倾向于输入参数尽量用const引用，指针还得判断是否为NULL，引用省事多了。google c++ code style也推荐这么做<br>
+void func(string &s); 这里的参数跟前面不同的是没有const限定，也就是说函数内部可以对s做修改，而且修改后的内容会影响到调用这个函数的人。为了跟输入参数区别开，推荐这种需要做修改的参数（相当于用做返回值），用地址传递。同样，这也是google c++ code style推荐的做法。

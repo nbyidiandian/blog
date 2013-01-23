@@ -1,0 +1,130 @@
+= 编码的困惑 =
+我们在后端程序开发过程中，经常需要通过终端（terminal）连接（ssh）到后台linux服务器上，通过终端交互来完成开发工作。在windows里，比较常用的终端工具有putty(http://www.chiark.greenend.org.uk/~sgtatham/putty/ )、secure CRT。在linux/mac里，可以直接使用系统自带的终端直接ssh。有的时候为了方便管理多个远程会话（session）窗口，我们还会用到screen(http://www.ibm.com/developerworks/cn/linux/l-cn-screen/ )。在服务器上编辑或查看文件， 我们会使用到如cat、more、less、vi/vim、emacs等文本查看或编辑工具。在这个过程中，涉及到了一系列的工具及编码转换，相信很多同学一定不可避免会遇到编码的问题，尤其是新同学，经常受编码问题困扰。这篇文章里，将会针对终端开发过程中遇到的编码问题，解决大家的困扰。
+
+= linux文件的编码 =
+在linux里，磁盘文件本身是没有编码的，完全根据写文件的人来决定。写文件时调用write/fwrite，传入需要写入内容的buf，buf里的内容会原样写到磁盘上。也就是说磁盘文件的编码跟buf里的字符串编码一致。<br>
+如果需要把一个非utf-8编码的字符串以utf-8编码形式写到磁盘上，先要将该字符串转换为utf-8编码，放到buf里，再调用write/fwrite写磁盘。<br>
+读取文件时，如果不关心文件的编码，比如写一个简单的cat程序，只需要从文件里依次按行读取，并原样输出读取到的字符串即可。<br>
+但是有的时候，我们在读取文件的时候需要将文件内容转换成特定形式的编码，在源文件编码未知的情况下，通常需要对文件内容的编码进行探测，从而判断文件的编码。在linux里，我们可以通过file命令来检测一个文件的编码
+
+= Vim的编码 =
+首先，我们来了解下linux下最常用的文本编辑器之一vim的编码。vim里有几个重要的关于编码的配置：encoding, termencoding, fileencoding, fileencodings（注意最后一个单词后面多了一个s）。关于这几项配置，在http://edyfox.codecarver.org/html/vim_fileencodings_detection.html 这篇文章里有非常详细完整的介绍，在此摘录如下：
+
+== encoding ==
+Vim 内部使用的字符编码方式。当我们设置了 encoding 之后，Vim 内部所有的 buffer、寄存器、脚本中的字符串等，全都使用这个编码。Vim 在工作的时候，如果编码方式与它的内部编码不一致，它会先把编码转换成内部编码。如果工作用的编码中含有无法转换为内部编码的字符，在这些字符就会丢失。因此，在选择 Vim 的内部编码的时候，一定要使用一种表现能力足够强的编码，以免影响正常工作。
+
+由于 encoding 选项涉及到 Vim 中所有字符的内部表示，因此只能在 Vim 启动的时候设置一次。在 Vim 工作过程中修改 encoding 会造成非常多的问题。如果没有特别的理由，请始终将 encoding 设置为 utf-8。为了避免在非 UTF-8 的系统如 Windows 下，菜单和系统提示出现乱码，可同时做这几项设置：
+
+<syntaxhighlight lang="cpp" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+set encoding=utf-8
+set langmenu=zh_CN.UTF-8
+language message zh_CN.UTF-8
+</syntaxhighlight>
+
+== termencoding ==
+termencoding 是 Vim 用于屏幕显示的编码，在显示的时候，Vim 会把内部编码转换为屏幕编码，再用于输出。内部编码中含有无法转换为屏幕编码的字符时，该字符会变成问号，但不会影响对它的编辑操作。如果 termencoding 没有设置，则直接使用 encoding 不进行转换。
+
+举个例子，当你在 Windows 下通过 telnet 登录 Linux 工作站时，由于 Windows 的 telnet 是 GBK 编码的，而 Linux 下使用 UTF-8 编码，你在 telnet 下的 Vim 中就会乱码。此时有两种消除乱码的方式：一是把 Vim 的 encoding 改为 gbk，另一种方法是保持 encoding 为 utf-8，把 termencoding 改为 gbk，让 Vim 在显示的时候转码。显然，使用前一种方法时，如果遇到编辑的文件中含有 GBK 无法表示的字符时，这些字符就会丢失。但如果使用后一种方法，虽然由于终端所限，这些字符无法显示，但在编辑过程中这些字符是不会丢失的。
+
+对于图形界面下的 GVim，它的显示不依赖 TERM，因此 termencoding 对于它没有意义。在 GTK2 下的 GVim 中，termencoding 永远是 utf-8，并且不能修改。而 Windows 下的 GVim 则忽略 termencoding 的存在。
+
+== fileencoding ==
+当 Vim 从磁盘上读取文件的时候，会对文件的编码进行探测。如果文件的编码方式和 Vim 的内部编码方式不同，Vim 就会对编码进行转换。转换完毕后，Vim 会将 fileencoding 选项设置为文件的编码。当 Vim 存盘的时候，如果 encoding 和 fileencoding 不一样，Vim 就会进行编码转换。因此，通过打开文件后设置 fileencoding，我们可以将文件由一种编码转换为另一种编码。但是，由前面的介绍可以看出，fileencoding 是在打开文件的时候，由 Vim 进行探测后自动设置的。因此，如果出现乱码，我们无法通过在打开文件后重新设置 fileencoding 来纠正乱码。
+
+== fileencodings ==
+编码的自动识别是通过设置 fileencodings 实现的，注意是复数形式。fileencodings 是一个用逗号分隔的列表，列表中的每一项是一种编码的名称。当我们打开文件的时候，VIM 按顺序使用 fileencodings 中的编码进行尝试解码，如果成功的话，就使用该编码方式进行解码，并将 fileencoding 设置为这个值，如果失败的话，就继续试验下一个编码。
+
+因此，我们在设置 fileencodings 的时候，一定要把要求严格的、当文件不是这个编码的时候更容易出现解码失败的编码方式放在前面，把宽松的编码方式放在后面。
+
+例如，latin1 是一种非常宽松的编码方式，任何一种编码方式得到的文本，用 latin1 进行解码，都不会发生解码失败——当然，解码得到的结果自然也就是理所当然的“乱码”。因此，如果你把 latin1 放到了 fileencodings 的第一位的话，打开任何中文文件都是乱码也就是理所当然的了。
+
+e.g.
+
+<syntaxhighlight lang="cpp" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+set fileencodings=ucs-bom,utf-8,cp936,gb18030,big5,euc-jp,euc-kr,latin1
+</syntaxhighlight>
+其中，ucs-bom 是一种非常严格的编码，非该编码的文件几乎没有可能被误判为 ucs-bom，因此放在第一位。
+
+utf-8 也相当严格，除了很短的文件外(例如许多人津津乐道的 GBK 编码的“联通”被误判为 UTF-8 编码的经典错误)，现实生活中一般文件是几乎不可能被误判的，因此放在第二位。
+
+接下来是 cp936 和 gb18030，这两种编码相对宽松，如果放前面的话，会出现大量误判，所以就让它们靠后一些。cp936 的编码空间比 gb18030 小，所以把 cp936 放在 gb18030 前面。
+
+至于 big5、euc-jp 和 euc-kr，它们的严格程度和 cp936 差不多，把它们放在后面，在编辑这些编码的文件的时候必然出现大量误判，但这是 Vim 内置编码探测机制没有办法解决的事。由于中国用户很少有机会编辑这些编码的文件，因此我们还是决定把 cp936 和 gb18030 前提以保证这些编码的识别。
+
+最后就是 latin1 了。它是一种极其宽松的编码，以至于我们不得不把它放在最后一位。不过可惜的是，当你碰到一个真的 latin1 编码的文件时，绝大部分情况下，它没有机会 fall-back 到 latin1，往往在前面的编码中就被误判了。不过，正如前面所说的，中国用户没有太多机会接触这样的文件。
+
+如果编码被误判了，解码后的结果就无法被人类识别，于是我们就说，这个文件乱码了。此时，如果你知道这个文件的正确编码的话，可以在打开文件的时候使用 ++enc=encoding 的方式来打开文件，如：
+
+<syntaxhighlight lang="bash" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+:e ++enc=utf-8 myfile.txt
+</syntaxhighlight>
+
+当然，关于这些配置，也可以在vim里通过":help encoding", ":help termencoding", ":help fileencoding", ":help fileencodings"了解官方的解释文档。
+
+完成了以上配置后，vim的问题就都基本解决了。接下来我们看看服务器端环境变量的问题。
+
+= locale的设置 =
+locale是软件在运行时的语言环境, 它包括语言(Language), 地域 (Territory) 和字符集(Codeset)。<br>
+我们先来看看locale的格式。locale的格式为: 语言[_地域[.字符集]]。所以说，locale总是和一定的字符集相联系的。e.g. <br>
+* zh_CN.GB2312＝中文_中华人民共和国＋国标2312字符集
+* zh_CN.GB18030＝中文_中华人民共和国＋国标18030字符集
+* zh_TW.BIG5=中文_台湾＋大五码字符集 
+* en_GB.ISO-8859-1=英文_大不列颠.ISO-8859-1字符集 
+* de_DE.UTF-8@euro＝德语_德国.UTF-8字符集@按照欧洲习惯加以修正，注意不是de_DE@euro.UTF-8，所以完全的locale表达方式是 [语言[_地域][.字符集] [@修正值]。 
+
+其中，与中文输入关系最密切的就是LC_CTYPE，LC_CTYPE规定了系统内有效的字符以及这些字符的分类，诸如什么是大写字母，小写字母，大小写转换，标点符号、可打印字符和其他的字符属性等方面。而locale定 义zh_CN中最最重要的一项就是定义了汉字(Class“hanzi”)这一个大类，当然也是用Unicode描述的，这就让中文字符在Linux系统中成为合法的有效字符，而且不论它们是用什么字符集编码的。 
+
+在linux里，我们可以通过locale命令查看当前的locale环境变量设置。
+<syntaxhighlight lang="bash" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+-bash$ locale
+LANG=en_US.UTF-8
+LC_CTYPE="en_US.UTF-8"
+LC_NUMERIC="en_US.UTF-8"
+LC_TIME="en_US.UTF-8"
+LC_COLLATE="en_US.UTF-8"
+LC_MONETARY="en_US.UTF-8"
+LC_MESSAGES="en_US.UTF-8"
+LC_PAPER="en_US.UTF-8"
+LC_NAME="en_US.UTF-8"
+LC_ADDRESS="en_US.UTF-8"
+LC_TELEPHONE="en_US.UTF-8"
+LC_MEASUREMENT="en_US.UTF-8"
+LC_IDENTIFICATION="en_US.UTF-8"
+LC_ALL=en_US.UTF-8
+</syntaxhighlight>
+但是这里的每一项分别是什么意思呢？<br>
+<pre>
+LC_CTYPE        语言符号及其分类
+LC_NUMERIC    数字
+LC_COLLATE    比较和排序习惯
+LC_TIME           时间显示格式
+LC_MONETARY 货币单位
+LC_MESSAGES   信息主要是提示信息,错误信息,状态信息,标题,标签,按钮和菜单等
+LC_NAME         姓名书写方式
+LC_ADDRESS    地址书写方式
+LC_TELEPHONE 电话号码书写方式
+LC_MEASUREMENT 度量衡表达方式
+LC_PAPER          默认纸张尺寸大小
+LC_IDENTIFICATION 对locale自身包含信息的概述
+LC_ALL
+</pre>
+
+= 终端编码 =
+这里的终端是指我们自己的机器，也就是发起ssh请求的client机器，通常也就是我们办公的机器了。
+
+== Windows - Putty ==
+
+== Windows - SecureCRT ==
+
+== Linux/Unix/Mac ==
+在unix系的系统下，我们可以直接使用系统自带的终端连到服务器上。这个时候终端的编码设置就比较简单了，一般来说我们只需要保证locale的设置跟服务器端一致，基本上就不会有什么问题了。
+
+= screen 编码 =
+在screen里，我们可以通过": encoding "命令来指定screen的输入编码和输出编码。e.g. <br>
+<pre>
+:encoding utf-8 gbk (第一个是screen内部能理解的编码，第二表示terminal的编码)
+</pre>
+这样我们就能将服务器端输出的utf-8编码转换为gbk编码输出到我的客户端机器上了，这时只要我的客户端终端设置编码为gbk，就能正常显示。
+
+= 实例讲解 =
+* 当终端设置为UTF-8编码时，怎么grep一个GBK的字符串：一种办法是用vim打开一个临时文件/tmp/t，并设置fileencoding为gbk，然后输入要grep的关键词并保存。然后使用命令grep `cat /tmp/t` . -r。另外一种办法是使用十六进制串表示GBK字符串。比如要grep中文的“剑豪”，则grep `echo -e "\xBD\xA3\xBA\xC0"` . -r

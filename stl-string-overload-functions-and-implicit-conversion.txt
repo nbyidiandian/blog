@@ -1,0 +1,487 @@
+不得不留意的STL string重载函数和隐式类型转换
+
+在360云引擎技术博客的[http://blogs.360.cn/360cloud/2012/11/26/linux-gcc-stl-string-in-depth/ 深入剖析linux GCC 4.4的STL string]这篇blog的指导下，看了一些STL string的实现代码，并针对我们平时对string的一些常规用法做了一些测试。这里做一下总结，希望能帮助大家更好的理解理解STL string，更高效的使用STL string。
+
+由于本文涉及到性能对比，接下来会有一些测试程序，所以首先看一下我们的测试环境：
+<syntaxhighlight lang="BASH">
+$ uname -sr
+Linux 2.6.32-220.23.1.tb750.el5.x86_64
+$ gcc --version
+gcc (GCC) 4.1.2 20080704 (Red Hat 4.1.2-51)
+</syntaxhighlight>
+ 
+= 构造函数 std::string::string =
+函数声明
+<syntaxhighlight lang="CPP">
+string ( );
+string ( const string& str );
+string ( const string& str, size_t pos, size_t n = npos );
+string ( const char * s, size_t n );
+string ( const char * s );
+string ( size_t n, char c );
+template<class InputIterator> string (InputIterator begin, InputIterator end);
+ </syntaxhighlight>
+
+我们对这些构造函数分别做下测试
+<syntaxhighlight lang="CPP" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+/* FILE: string_construct.cpp */
+
+#include <stdio.h>
+#include <string>
+#include <sys/time.h>
+
+int64_t getCurrentTime()
+{
+    struct timeval tval;
+    gettimeofday(&tval, NULL);
+    return (tval.tv_sec * 1000000LL + tval.tv_usec);
+}
+
+int main(int argc, char *argv[])
+{
+    const int loop = 10000;
+
+    std::string source;
+    source.resize(10240, '1');
+
+    int64_t start = 0;
+    int64_t end = 0;
+
+    start = getCurrentTime();
+    for (int i = 0; i < loop; ++i)
+    {
+        std::string str(source);
+    }
+    end = getCurrentTime();
+    printf("call %-35s %d times: %ld us\n",
+           "string(const string &)", loop, (end - start));
+
+    start = getCurrentTime();
+    for (int i = 0; i < loop; ++i)
+    {
+        std::string str(source, 0);
+    }
+    end = getCurrentTime();
+    printf("call %-35s %d times: %ld us\n",
+           "string(const string &, size_t)", loop, (end - start));
+
+    start = getCurrentTime();
+    for (int i = 0; i < loop; ++i)
+    {
+        std::string str(source.c_str());
+    }
+    end = getCurrentTime();
+    printf("call %-35s %d times: %ld us\n",
+           "string(const char *)", loop, (end - start));
+
+    start = getCurrentTime();
+    for (int i = 0; i < loop; ++i)
+    {
+        std::string str(source.c_str(), source.size());
+    }
+    end = getCurrentTime();
+    printf("call %-35s %d times: %ld us\n",
+           "string(const char *, size_t)", loop, (end - start));
+
+    start = getCurrentTime();
+    for (int i = 0; i < loop; ++i)
+    {
+        std::string str(source.size(), source.at(0));
+    }
+    end = getCurrentTime();
+    printf("call %-35s %d times: %ld us\n",
+           "string(size_t, char)", loop, (end - start));
+
+    start = getCurrentTime();
+    for (int i = 0; i < loop; ++i)
+    {
+        std::string str(source.begin(), source.end());
+    }
+    end = getCurrentTime();
+    printf("call %-35s %d times: %ld us\n",
+           "string(Iterator, Iterator)", loop, (end - start));
+
+    return 0;
+}
+ </syntaxhighlight>
+
+在运行这段测试代码前，你可以尝试分析一下这几个函数调用，哪个耗时最长，哪个耗时最短呢？ <br>
+……<br>
+<br>
+再来看看编译运行的结果：
+<syntaxhighlight lang="BASH">
+$ g++ -Wall -O2 -o string_construct string_construct.cpp
+$ ./string_construct
+call string(const string &)              10000 times: 528 us
+call string(const string &, size_t)      10000 times: 9064 us
+call string(const char *)                10000 times: 30021 us
+call string(const char *, size_t)        10000 times: 9092 us
+call string(size_t, char)                10000 times: 5719 us
+call string(Iterator, Iterator)          10000 times: 8996 us
+ </syntaxhighlight>
+这里输出的结果跟你的预期一样么？我想只要仔细想想，应该都能预料到这个结果：<br>
+* string(const string &)
+毫无疑问它是最快的，因为string的COW(copy-on-write)特性。至于COW就不在本文讨论范围了，感兴趣的朋友可以参考[http://blogs.360.cn/360cloud/2012/11/26/linux-gcc-stl-string-in-depth/ 深入剖析 linux GCC 4.4 的 STL string] <br>
+* string(const string &, size_t)
+* string(const char *, size_t)
+* string(size_t, char)
+* string(Iterator, Iterator)
+这几个差别不大，都需要分配一块内存，然后将source里的内容拷贝过去 <br>
+* string(const char *)
+它耗时非常大，这个我想应该会出乎部分人的意料：平时咱们很多时候就是这么用的啊？！它跟string(const char *, size_t)只是差了一个参数而已！但是要注意，这个参数是前面的字符串的长度！如果没有这个长度，那就不能确定需要分配的内存的大小，只能先计算一遍长度。可以通过stl的源码(/usr/include/c++/4.1.2/bits/basic_string.tcc)来确认下，这里摘取相关部分如下：
+<syntaxhighlight lang="CPP" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+  template<typename _CharT, typename _Traits, typename _Alloc>
+    basic_string<_CharT, _Traits, _Alloc>::
+    basic_string(const _CharT* __s, size_type __n, const _Alloc& __a) 
+    : _M_dataplus(_S_construct(__s, __s + __n, __a), __a) 
+    { }
+
+  template<typename _CharT, typename _Traits, typename _Alloc>
+    basic_string<_CharT, _Traits, _Alloc>::
+    basic_string(const _CharT* __s, const _Alloc& __a) 
+    : _M_dataplus(_S_construct(__s, __s ? __s + traits_type::length(__s) :
+                   __s + npos, __a), __a) 
+    { }
+</syntaxhighlight>
+通过这两个函数的实现代码可以看出，唯一的差别就在于 traits_type::length(__s)。traits_type::length的实现在/usr/include/c++/4.1.2/bits/char_traits.h，说简单一点就是于对string，直接调用strlen，对于wstring，则调用wcslen，这里就不详细介绍了。
+
+<font color="red"> 小结 </font> <br>
+# 在做string的拷贝时，尽量使用string(const string &)的形式，以享受COW带来的好处
+# 当需要使用char *构造一个string时，如果你已经知道这个char *表示的字符串长度，记得把这个长度一起传给string的构造函数
+# 我想不会有人傻到用string str(source.c_str(), source.size())这种方式拷贝一个string吧？当然上面测试代码只是为了便于理解所以采用了这种形式
+
+
+顺便提一下，std::string::assign跟std::string的构造函数类似，测试结果也基本一样。string& assign(const string &)跟string(const string &)一样也有copy-on-write。
+<syntaxhighlight lang="CPP">
+string& assign ( const string& str );
+string& assign ( const string& str, size_t pos, size_t n );
+string& assign ( const char* s, size_t n );
+string& assign ( const char* s );
+string& assign ( size_t n, char c );
+template <class InputIterator> string& assign ( InputIterator first, InputIterator last );
+ </syntaxhighlight>
+
+
+= 比较函数 std::string::compare =
+函数声明
+ <syntaxhighlight lang="CPP">
+int compare ( const string& str ) const;
+int compare ( const char* s ) const;
+int compare ( size_t pos1, size_t n1, const string& str ) const;
+int compare ( size_t pos1, size_t n1, const char* s) const;
+int compare ( size_t pos1, size_t n1, const string& str, size_t pos2, size_t n2 ) const;
+int compare ( size_t pos1, size_t n1, const char* s, size_t n2) const;
+ </syntaxhighlight>
+对于compare函数，这里同样有一段测试代码，一起来看下：<br>
+<syntaxhighlight lang="CPP" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+/* FILE: string_compare.cpp */
+
+#include <stdio.h>
+#include <string>
+#include <sys/time.h>
+
+int64_t getCurrentTime()
+{
+    struct timeval tval;
+    gettimeofday(&tval, NULL);
+    return (tval.tv_sec * 1000000LL + tval.tv_usec);
+}
+
+#define FOO "123456789012345678901234567890"                \
+    "12345678901234567890123456789012345678901234567890"
+
+int compareWithStaticString(const std::string &str) __attribute__((noinline));
+int compareWithConstString(const std::string &str) __attribute__((noinline));
+int compareWithCString(const std::string &str) __attribute__((noinline));
+int compareUseStrcmp(const std::string &str) __attribute__((noinline));
+
+struct TestCase
+{
+    std::string name;
+    int (*func)(const std::string &);
+};
+
+TestCase cases[] = {
+    {
+        "compare with static string",
+        compareWithStaticString
+    },
+    {   
+        "compare with const string",
+        compareWithConstString
+    },
+    {
+        "compare with c-string",
+        compareWithCString
+    },
+    {
+        "compare use strcmp",
+        compareUseStrcmp
+    }
+};
+
+int main(int argc, char *argv[])
+{
+    const int loop = 10000;
+
+    int64_t start = 0;
+    int64_t end = 0;
+
+    const std::string target(FOO);
+
+    for (size_t i = 0; i < (sizeof(cases) / sizeof(TestCase)); ++i)
+    {
+        start = getCurrentTime();
+        for (int j = 0; j < loop; ++j)
+        {
+            cases[i].func(target);
+        }
+        end = getCurrentTime();
+        printf("%-30s %d times: %ldus\n",
+               cases[i].name.c_str(), loop, (end - start));
+    }
+
+    return 0;
+}
+
+int compareWithStaticString(const std::string &str)
+{
+    static const std::string foo(FOO);
+    return (str.compare(foo));
+}
+
+int compareWithConstString(const std::string &str)
+{
+    const std::string foo(FOO);
+    return (str.compare(foo));
+}
+
+int compareWithCString(const std::string &str)
+{
+    return (str.compare(FOO));
+}
+
+int compareUseStrcmp(const std::string &str)
+{
+    return (strcmp(str.c_str(), FOO));
+}
+</syntaxhighlight>
+在这段测试程序里，我们有4个比较测试函数，各个函数都将参数传进来的string跟自已预先定义好的一个字符串做比较。函数声明里加上noinline的attribute是为了防止编译器把compareUseStrcmp这个函数调用优化掉<br>
+同样，先尝试分析下运行这个测试程序会有什么样的结果？再来编译运行：
+<syntaxhighlight lang="BASH">
+$ g++ -Wall -O2 -o string_compare string_compare.cpp
+$ ./string_compare
+compare with static string     10000 times: 2399us
+compare with const string      10000 times: 4156us
+compare with c-string          10000 times: 2625us
+compare use strcmp             10000 times: 2388us
+ </syntaxhighlight>
+先来分析compare with static string和compare with const string这两个case，结果很明显，compareWithConstString这个函数里，每次函数调用都会在栈上构造一个foo临时对象，调用10000次就有10000次的构造和析构，当然很耗时了。所以，<font color="red">我们应该尽量用static const string表示字符串常量，而不是const string</font> <br>
+再来对比compare with static string和compare with c-string，它俩为什么还差了近3ms的时间呢？我们去源码里寻找答案：
+<syntaxhighlight lang="CPP" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+  template<typename _CharT, typename _Traits, typename _Alloc>
+    int
+    basic_string<_CharT, _Traits, _Alloc>::
+    compare(const _CharT* __s) const
+    { 
+      __glibcxx_requires_string(__s);
+      const size_type __size = this->size();
+      const size_type __osize = traits_type::length(__s);
+      const size_type __len = std::min(__size, __osize);
+      int __r = traits_type::compare(_M_data(), __s, __len);
+      if (!__r)
+    __r = __size - __osize;
+      return __r;
+    }
+</syntaxhighlight>
+看到了吗，这里又有个traits_type::length！所以，<font color="red">我们应该尽量用static const string表示字符串常量，而不是const string，也不是const char *</font><br>
+compare with static string跟compare use strcmp结果差不多，我们就不分析了。<br>
+
+至于std::string的几个比较运算符（operator==，operator!=，operator>，operator<，operator>=，operator<=）都是直接调用的std::string::compare。我们也不多做分析了。
+ 
+std::string里还有几个类似的函数重载，列举如下，我们在使用的时候都需要注意同样的问题：<br>
+std::string::find
+ <syntaxhighlight lang="CPP">
+size_t find ( const string& str, size_t pos = 0 ) const;
+size_t find ( const char* s, size_t pos, size_t n ) const;
+size_t find ( const char* s, size_t pos = 0 ) const;
+size_t find ( char c, size_t pos = 0 ) const;
+ </syntaxhighlight>
+ 
+ 
+std::string::append
+ <syntaxhighlight lang="CPP">
+string& append ( const string& str );
+string& append ( const string& str, size_t pos, size_t n );
+string& append ( const char* s, size_t n );
+string& append ( const char* s );
+string& append ( size_t n, char c );
+template <class InputIterator> string& append ( InputIterator first, InputIterator last );
+ </syntaxhighlight>
+ 
+
+std::string::replace
+ <syntaxhighlight lang="CPP">
+string& replace ( size_t pos1, size_t n1, const string& str );
+string& replace ( iterator i1, iterator i2, const string& str ); 
+string& replace ( size_t pos1, size_t n1, const string& str, size_t pos2, size_t n2 );
+string& replace ( size_t pos1, size_t n1, const char* s, size_t n2 ); 
+string& replace ( iterator i1, iterator i2, const char* s, size_t n2 );
+string& replace ( size_t pos1, size_t n1, const char* s );
+string& replace ( iterator i1, iterator i2, const char* s );
+string& replace ( size_t pos1, size_t n1, size_t n2, char c );
+string& replace ( iterator i1, iterator i2, size_t n2, char c );
+template<class InputIterator> string& replace ( iterator i1, iterator i2, InputIterator j1, InputIterator j2 );
+ </syntaxhighlight>
+ 
+= 隐式类型转换 =
+前面的测试结果表明，当STLstring有提供std::string作为参数的函数重载时，应该尽量使用std::string作为参数。接下来我们再看另外一个case：<br>
+<syntaxhighlight lang="CPP" line="GESHI_NORMAL_LINE_NUMBERS|GESHI_FANCY_LINE_NUMBERS">
+/* FILE: implicit_conversion.cpp */
+#include <map>
+#include <string>
+#include <stdio.h>
+#include <sys/time.h>
+
+int64_t getCurrentTime()
+{
+    struct timeval tval;
+    gettimeofday(&tval, NULL);
+    return (tval.tv_sec * 1000000LL + tval.tv_usec);
+}
+
+typedef std::map<std::string, std::string> StringMap;
+
+int testCStringKeyInMap(const StringMap &m)
+{
+    int found = 0;
+    found += (m.find("key1") != m.end() ? 1 : 0);
+    found += (m.find("key4") != m.end() ? 1 : 0);
+    return found;
+}
+
+int testStringKeyInMap(const StringMap &m)
+{
+    static const std::string key1 = "key1";
+    static const std::string key4 = "key4";
+    int found = 0;
+    found += (m.find(key1) != m.end() ? 1 : 0);
+    found += (m.find(key4) != m.end() ? 1 : 0);
+    return found;
+}
+
+int main(int argc, char *argv[])
+{
+    const int loop = 10000;
+
+    StringMap m;
+    m["key1"] = "value1";
+    m["key2"] = "value2";
+    m["key3"] = "value3";
+
+    int64_t start = 0;
+    int64_t end = 0;
+
+    start = getCurrentTime();
+    for (int i = 0; i < loop; ++i)
+    {
+        testCStringKeyInMap(m);
+    }
+    end = getCurrentTime();
+    printf("call %-35s %d times: %ld us\n",
+           "map[const char *]", loop, (end - start));
+
+    start = getCurrentTime();
+    for (int i = 0; i < loop; ++i)
+    {
+        testStringKeyInMap(m);
+    }
+    end = getCurrentTime();
+    printf("call %-35s %d times: %ld us\n",
+           "map[const std::string &]", loop, (end - start));
+
+    return 0;
+}
+</syntaxhighlight>
+这里我们主要测的是std::string作为std::map的key时，判断指定的key是否在map里，也就是std::map<std::string, std::string>::find函数。那么我们先来看看std::map的find函数原型：<br>
+<syntaxhighlight lang="CPP">
+iterator find (const key_type& k);
+const_iterator find (const key_type& k) const;
+</syntaxhighlight>
+这里find函数的参数是const key_type &k，在我们的测试程序里也就是const std::string &k。也就是说find函数只能接受std::string作为参数，但是在我们的测试程序里将一个字符串常量"key1"传给了find函数。这里就涉及到了隐式类型转换，将"key1"转换成一个临时的std::string对象。显然，这里的隐式类型转换需要构造一个临时的std::string对象，需要消耗时间。那我们看一下测试结果：
+<syntaxhighlight lang="BASH">
+$ g++ -O2 -o implicit_conversion implicit_conversion.cpp 
+$ ./implicit_conversion
+call map[const char *]                   10000 times: 4653 us
+call map[const std::string &]            10000 times: 2441 us
+</syntaxhighlight>
+结果很明显，正如我们分析的：隐式类型转换消耗了不少时间。<br>
+所以，在我们的代码里，应该尽量使用static const std::string的形式来表示字符串常量！<br>
+
+= 几种典型的误用场景 =
+== 构造函数 ==
+<syntaxhighlight lang="CPP">
+std::string decode(const std::string &str);
+std::string decode(const char *str)
+{
+    decode(std::string(str));
+}
+
+void test()
+{
+    std::string input;
+    std::cin >> input;
+    std::output = decode(input.c_str());
+}
+</syntaxhighlight>
+
+
+== 比较函数 ==
+<syntaxhighlight lang="CPP">
+std::string command;
+std::cin >> command;
+                                                      // static const std::string get = "get";
+                                                      // static const std::string set = "set";
+if (command == "get")                   // if (str == get)
+{
+  printf("get command\n");
+}
+else if (command == "set")             // if (str == set)
+{
+  printf(set command\n";
+}
+</syntaxhighlight>
+
+== 字符串拼接 ==
+<syntaxhighlight lang="CPP">
+std::string keyword, properties;
+std::cin >> keyword >> properties;
+
+std::string url;
+url += "/bin/search?";        // static const std::string prefix = "/bin/search?"; url += prefix;
+url += "q=";                       // static const std::string q_key = "q="; url += qkey;
+url += keyword;
+url += "&";                         // url += '&';
+url += "properties=";         // static const std::string properties_key = "properties="; url += properties;
+url += properties; 
+url += "&outfmt=json"       // static const std::string outfmt = "&outfmt=json"; url += outfmt;
+</syntaxhighlight>
+
+== 隐式类型转换 ==
+<syntaxhighlight lang="CPP">
+std::map<std::string, std::string> m;
+m["key1"] = "value1";                                   // 
+                                                                   // static const std::string key1 = "key1";
+                                                                   // static const std::string value1 = "value1";
+                                                                   // m[key1] = value1;
+m["key2"] = "value2";
+…
+const std::string &v1 = m["key1"];               // const std::string &v1 = m[key1];
+const std::string &v2 = m["key2"];
+</syntaxhighlight>
+
+这几段代码看着眼熟么？赶紧改掉吧 :) <br>
+
+= 总结 =
+# 尽量用static const string来表示字符串常量
+# 当一个函数内部需要与参数传进来的字符串做string相关操作，那就将参数类型设为std::string &，而不要用char *
